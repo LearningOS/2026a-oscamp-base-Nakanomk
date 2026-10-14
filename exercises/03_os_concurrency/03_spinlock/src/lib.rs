@@ -31,32 +31,45 @@ impl<T> SpinLock<T> {
 
     /// Acquire lock, returning a mutable reference to inner data.
     ///
-    /// TODO: Use compare_exchange to spin until lock is acquired
-    /// 1. In a loop, try to change locked from false to true
-    /// 2. Success uses Acquire ordering, failure uses Relaxed
-    /// 3. On failure call `core::hint::spin_loop()` to hint CPU
-    /// 4. On success return `&mut *self.data.get()`
+    /// Uses an Acquire compare-and-exchange to synchronize with the previous
+    /// owner's Release unlock.
     ///
     /// # Safety
-    /// Caller must ensure `unlock` is called after using the data.
+    /// The caller must release the lock after using the data, and must not use
+    /// any reference returned by this lock after unlocking. Only the current
+    /// owner may unlock. This manual API cannot enforce those requirements;
+    /// prefer the RAII guard exercise for safe automatic ownership tracking.
     pub fn lock(&self) -> &mut T {
-        // TODO
-        todo!()
+        loop {
+            if let Some(data) = self.try_lock() {
+                return data;
+            }
+            while self.locked.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        }
     }
 
     /// Release lock.
     ///
-    /// TODO: Set locked to false (using Release ordering)
+    /// The current owner must stop using all borrowed data before calling this.
     pub fn unlock(&self) {
-        // TODO
-        todo!()
+        self.locked.store(false, Ordering::Release);
     }
 
     /// Try to acquire lock without spinning.
     /// Returns Some(&mut T) on success, None if lock is busy.
     pub fn try_lock(&self) -> Option<&mut T> {
-        // TODO: Single compare_exchange attempt
-        todo!()
+        if self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            // The successful transition grants exclusive access until unlock.
+            Some(unsafe { &mut *self.data.get() })
+        } else {
+            None
+        }
     }
 }
 

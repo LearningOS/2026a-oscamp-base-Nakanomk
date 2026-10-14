@@ -7,7 +7,7 @@
 //! ## Key Concepts
 //! - **Callee-saved registers**: Save and restore them on switch so the switched-away task can resume correctly later.
 //! - **Stack pointer `sp`** and **return address `ra`**: Restore them in the new context; the first time we switch to a task, `ret` jumps to `ra` (the entry point).
-//! - Inline assembly: `core::arch::asm!`
+//! - Naked assembly: `core::arch::naked_asm!`
 //!
 //! ## riscv64 ABI (for this exercise)
 //! - Callee-saved: `sp`, `ra`, `s0`–`s11`. The `ret` instruction is `jalr zero, 0(ra)`.
@@ -15,7 +15,7 @@
 
 #![cfg(target_arch = "riscv64")]
 
-/// Saved register state for one task (riscv64). Layout must match the offsets used in the asm below: for one task (riscv64). Layout must match the offsets used in the asm below:
+/// Saved integer register state for one task (riscv64). Layout must match the asm offsets:
 /// `sp` at 0, `ra` at 8, then `s0`–`s11` at 16, 24, … 104.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -62,17 +62,102 @@ impl TaskContext {
     /// - Set `sp = stack_top` with 16-byte alignment (RISC-V ABI requires 16-byte aligned stack at function entry).
     /// - Leave `s0`–`s11` zero; they will be loaded on switch.
     pub fn init(&mut self, stack_top: usize, entry: usize) {
-        todo!("set ra = entry, sp = stack_top (16-byte aligned)")
+        *self = Self::empty();
+        self.ra = entry as u64;
+        self.sp = (stack_top & !15) as u64;
     }
 }
 
-/// Switch from `old` to `new` context: save current callee-saved regs into `old`, load from `new`, then `ret` (jumps to `new.ra`).
+/// Switch from `old` to `new`, preserving the RISC-V callee-saved registers.
 ///
-/// In asm: store `sp`, `ra`, `s0`–`s11` to `[a0]` (old), load from `[a1]` (new), zero `a0`/`a1` so we do not leak pointers into the new context, then `ret`.
+/// The integer context keeps its fixed layout. Floating-point callee-saved registers,
+/// `fcsr`, and the caller's return address live in a 16-byte-aligned frame on the
+/// suspended stack; `old.ra` resumes at the assembly epilogue that restores them.
+/// A newly initialized context instead jumps directly to its entry.
 ///
-/// Must be `#[unsafe(naked)]` to prevent the compiler from generating a prologue/epilogue.
+/// # Safety
+/// `new` must be initialized with a live, sufficiently large stack or have been saved
+/// by this function. Contexts must not overlap or be resumed concurrently. An initial
+/// entry must switch away permanently on completion; it must not return or unwind.
+/// Both stacks and contexts must remain live until their suspended execution ends.
 pub unsafe fn switch_context(old: &mut TaskContext, new: &TaskContext) {
-    todo!("save callee-saved regs to old, load from new, then ret; use #[unsafe(naked)] + naked_asm!, see module doc for riscv64 ABI and layout")
+    switch_context_raw(old, new);
+}
+
+// Keep the public Rust ABI while fixing the assembly argument registers to a0/a1.
+#[unsafe(naked)]
+unsafe extern "C" fn switch_context_raw(_old: *mut TaskContext, _new: *const TaskContext) {
+    core::arch::naked_asm!(
+        ".option push",
+        ".option arch, +d",
+        "addi sp, sp, -112",
+        "sd ra, 0(sp)",
+        "frcsr t0",
+        "sd t0, 8(sp)",
+        "fsd fs0, 16(sp)",
+        "fsd fs1, 24(sp)",
+        "fsd fs2, 32(sp)",
+        "fsd fs3, 40(sp)",
+        "fsd fs4, 48(sp)",
+        "fsd fs5, 56(sp)",
+        "fsd fs6, 64(sp)",
+        "fsd fs7, 72(sp)",
+        "fsd fs8, 80(sp)",
+        "fsd fs9, 88(sp)",
+        "fsd fs10, 96(sp)",
+        "fsd fs11, 104(sp)",
+        "sd sp, 0(a0)",
+        "lla t0, 2f",
+        "sd t0, 8(a0)",
+        "sd s0, 16(a0)",
+        "sd s1, 24(a0)",
+        "sd s2, 32(a0)",
+        "sd s3, 40(a0)",
+        "sd s4, 48(a0)",
+        "sd s5, 56(a0)",
+        "sd s6, 64(a0)",
+        "sd s7, 72(a0)",
+        "sd s8, 80(a0)",
+        "sd s9, 88(a0)",
+        "sd s10, 96(a0)",
+        "sd s11, 104(a0)",
+        "ld sp, 0(a1)",
+        "ld ra, 8(a1)",
+        "ld s0, 16(a1)",
+        "ld s1, 24(a1)",
+        "ld s2, 32(a1)",
+        "ld s3, 40(a1)",
+        "ld s4, 48(a1)",
+        "ld s5, 56(a1)",
+        "ld s6, 64(a1)",
+        "ld s7, 72(a1)",
+        "ld s8, 80(a1)",
+        "ld s9, 88(a1)",
+        "ld s10, 96(a1)",
+        "ld s11, 104(a1)",
+        "li a0, 0",
+        "li a1, 0",
+        "ret",
+        "2:",
+        "fld fs0, 16(sp)",
+        "fld fs1, 24(sp)",
+        "fld fs2, 32(sp)",
+        "fld fs3, 40(sp)",
+        "fld fs4, 48(sp)",
+        "fld fs5, 56(sp)",
+        "fld fs6, 64(sp)",
+        "fld fs7, 72(sp)",
+        "fld fs8, 80(sp)",
+        "fld fs9, 88(sp)",
+        "fld fs10, 96(sp)",
+        "fld fs11, 104(sp)",
+        "ld t0, 8(sp)",
+        "fscsr t0",
+        "ld ra, 0(sp)",
+        "addi sp, sp, 112",
+        "ret",
+        ".option pop",
+    );
 }
 
 const STACK_SIZE: usize = 1024 * 64;
@@ -80,7 +165,9 @@ const STACK_SIZE: usize = 1024 * 64;
 /// Allocate a stack for a coroutine. Returns `(buffer, stack_top)` where `stack_top` is the high address
 /// (stack grows down). The buffer must be kept alive for the lifetime of the context using this stack.
 pub fn alloc_stack() -> (Vec<u8>, usize) {
-    todo!("allocate stack buffer, return (buffer, stack_top) with stack_top 16-byte aligned")
+    let buffer = vec![0; STACK_SIZE];
+    let stack_top = (buffer.as_ptr() as usize + buffer.len()) & !15;
+    (buffer, stack_top)
 }
 
 #[cfg(test)]

@@ -15,23 +15,51 @@ use tokio::sync::mpsc;
 ///
 /// Hint: Set channel capacity to items.len().max(1)
 pub async fn producer_consumer(items: Vec<String>) -> Vec<String> {
-    // TODO: Create channel with mpsc::channel
-    // TODO: Spawn producer task: iterate through items, send each one
-    // TODO: Spawn consumer task: loop recv until channel closes, collect results
-    // TODO: Wait for consumer to complete and return results
-    todo!()
+    let count = items.len();
+    let (sender, mut receiver) = mpsc::channel(count.max(1));
+    let producer = tokio::spawn(async move {
+        for item in items {
+            sender.send(item).await.expect("consumer closed early");
+        }
+    });
+    let consumer = tokio::spawn(async move {
+        let mut received = Vec::with_capacity(count);
+        while let Some(item) = receiver.recv().await {
+            received.push(item);
+        }
+        received
+    });
+
+    producer.await.expect("producer task failed");
+    consumer.await.expect("consumer task failed")
 }
 
 /// Fan‑in pattern: multiple producers, one consumer.
 /// Create `n_producers` producers, each sending `"producer {id}: message"`.
 /// Consumer collects all messages, sorts them, and returns.
 pub async fn fan_in(n_producers: usize) -> Vec<String> {
-    // TODO: Create mpsc channel
-    // TODO: Spawn n_producers producer tasks
-    //       Each sends format!("producer {id}: message")
-    // TODO: Drop the original sender (important! otherwise channel won't close)
-    // TODO: Consumer loops receiving, collects and sorts
-    todo!()
+    let (sender, mut receiver) = mpsc::channel(n_producers.max(1));
+    let mut producers = Vec::with_capacity(n_producers);
+    for id in 0..n_producers {
+        let sender = sender.clone();
+        producers.push(tokio::spawn(async move {
+            sender
+                .send(format!("producer {id}: message"))
+                .await
+                .expect("consumer closed early");
+        }));
+    }
+    drop(sender);
+
+    let mut messages = Vec::with_capacity(n_producers);
+    while let Some(message) = receiver.recv().await {
+        messages.push(message);
+    }
+    for producer in producers {
+        producer.await.expect("producer task failed");
+    }
+    messages.sort_unstable();
+    messages
 }
 
 #[cfg(test)]

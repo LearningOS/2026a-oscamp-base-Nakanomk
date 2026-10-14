@@ -304,10 +304,10 @@ description = "Implement writer-priority RwLock from scratch using atomics; no s
 hint = """
 Rust provides std::sync::RwLock; this exercise implements a minimal writer-priority version for learning.
 
-State in one AtomicU32: reader_count (low bits), WRITER_HOLDING, WRITER_WAITING. Writer-priority: set WRITER_WAITING before waiting so new readers block.
+State in one AtomicU64: reader count in bits 0-29, WRITER_HOLDING in bit 30, WRITER_WAITING in bit 31, queued-writer count in bits 32-63. Track every pending writer so one writer cannot clear another writer's waiting state.
 
 read: spin until !WRITER_HOLDING && !WRITER_WAITING, then CAS increment reader count. Release: fetch_sub(1).
-write: fetch_or(WRITER_WAITING); spin until no readers and no holder; CAS(WRITER_WAITING, WRITER_HOLDING). Release: fetch_and(!(WRITER_HOLDING|WRITER_WAITING)).
+write: CAS-increment the queued count and set WRITER_WAITING; wait for no readers or holder; CAS to set WRITER_HOLDING and decrement the queued count. Clear WRITER_WAITING only when no queued writers remain. Release clears only WRITER_HOLDING.
 Guards: Deref/DerefMut and Drop to release."""
 
 # ============================================================
@@ -322,25 +322,22 @@ module = "Context Switching"
 description = "Use inline assembly to implement context save/restore, understand callee-saved registers"
 hint = """
 TaskContext::init:
-  unsafe {
-      let stack_ptr = stack_top as *mut usize;
-      *stack_ptr.sub(1) = entry;  // place entry address at stack top (simulate return address)
-  }
-  self.rsp = (stack_top - 8) as u64;  // rsp points to return address
+  *self = Self::empty();
+  self.ra = entry as u64;
+  self.sp = (stack_top & !15) as u64;
 
 switch_context:
-  asm!(
-      "mov [rdi+0x00], rsp",  "mov [rdi+0x08], rbx",  // ... save to old
-      "mov rsp, [rsi+0x00]",  "mov rbx, [rsi+0x08]",  // ... restore from new
-      "ret",                  // pop stack top address and jump
-      in("rdi") old as *mut _ as u64,
-      in("rsi") new as *const _ as u64,
-      clobber_abi("C"),
-  );
+  Use a naked extern "C" assembly routine: a0 = old context, a1 = new context.
+  Save sp, ra, s0-s11 at offsets 0, 8, 16 through 104; restore the new context.
+  RISC-V ret jumps through ra; it does not pop an x86-style stack return address.
+  Preserve LP64D callee-saved floating-point registers and fcsr in an aligned
+  suspended stack frame, resuming through an epilogue that restores that frame.
+  Enable the D extension explicitly around naked assembly with .option push,
+  .option arch, +d, and .option pop.
 
 alloc_stack:
   let buf = vec![0u8; STACK_SIZE];
-  let top = buf.as_ptr() as usize + STACK_SIZE;
+  let top = (buf.as_ptr() as usize + STACK_SIZE) & !15;
   (buf, top)"""
 
 [[exercise]]
@@ -350,25 +347,21 @@ path = "exercises/04_context_switch/02_green_threads/src/lib.rs"
 module = "Context Switching"
 description = "Implement cooperative green thread scheduler based on context switching"
 hint = """
-spawn: allocate stack, place two addresses at stack top:
-  *(top-8)  = thread_finished as usize  // guard function (called after entry returns)
-  *(top-16) = entry as usize            // entry address
-  ctx.rsp = top - 16
+spawn:
+  Allocate and retain a stack for the green thread.
+  Set ctx.sp to the 16-byte-aligned stack top and ctx.ra to thread_wrapper.
+  Store the user entry in GreenThread; the wrapper calls it and marks completion.
 
-schedule_next: poll for next Ready thread
-  for i in 1..=self.threads.len() {
-      let next = (self.current + i) % self.threads.len();
-      if self.threads[next].state == Ready { ... switch ... }
-  }
+schedule_next:
+  Search other threads in round-robin order for the next Ready thread.
+  Mark the old thread Ready unless Finished, and mark the next thread Running.
+  Pass its initial entry through the OS-thread-local entry cell.
+  End scheduler borrows before switching with raw context pointers.
 
 run:
-  unsafe { SCHEDULER = self as *mut _; }
-  loop {
-      let alive = self.threads.iter().skip(1)
-          .any(|t| t.state != Finished);
-      if !alive { break; }
-      self.schedule_next();
-  }"""
+  Install the active scheduler in an OS-thread-local cell.
+  Schedule until all non-main threads are Finished, then restore the prior cell.
+  Finished threads must never resume; keep their stacks until back on main."""
 
 # ============================================================
 #  Module 5: Async Programming

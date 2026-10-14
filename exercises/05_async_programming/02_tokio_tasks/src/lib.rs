@@ -14,10 +14,16 @@ use tokio::time::{sleep, Duration};
 ///
 /// Hint: Create `tokio::spawn` task for each i, collect JoinHandle, await them sequentially.
 pub async fn concurrent_squares(n: usize) -> Vec<usize> {
-    // TODO: Create n asynchronous tasks, each computing i * i
-    // TODO: Collect all JoinHandle
-    // TODO: Await each one to get result
-    todo!()
+    let mut tasks: Vec<JoinHandle<usize>> = Vec::with_capacity(n);
+    for i in 0..n {
+        tasks.push(tokio::spawn(async move { i * i }));
+    }
+
+    let mut results = Vec::with_capacity(n);
+    for task in tasks {
+        results.push(task.await.expect("square task failed"));
+    }
+    results
 }
 
 /// Concurrently execute multiple "time-consuming" tasks (simulated with sleep), return all results.
@@ -25,10 +31,20 @@ pub async fn concurrent_squares(n: usize) -> Vec<usize> {
 ///
 /// Key: All tasks should execute concurrently, total duration should be close to single task duration, not sum of all tasks.
 pub async fn parallel_sleep_tasks(n: usize, duration_ms: u64) -> Vec<usize> {
-    // TODO: Create asynchronous task for each id in 0..n
-    // TODO: Each task sleeps specified duration and returns its own id
-    // TODO: Collect all results and sort
-    todo!()
+    let mut tasks: Vec<JoinHandle<usize>> = Vec::with_capacity(n);
+    for task_id in 0..n {
+        tasks.push(tokio::spawn(async move {
+            sleep(Duration::from_millis(duration_ms)).await;
+            task_id
+        }));
+    }
+
+    // Joining in creation order keeps the results sorted without serializing the tasks.
+    let mut results = Vec::with_capacity(n);
+    for task in tasks {
+        results.push(task.await.expect("sleep task failed"));
+    }
+    results
 }
 
 #[cfg(test)]
